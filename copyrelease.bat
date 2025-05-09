@@ -1,5 +1,6 @@
-set MAFIAPATH=G:\Steam\steamapps\common\Mafia III
-set mypath=C:\Users\Martin\Desktop\Mafia3ScriptHook
-copy /Y /B "%mypath%\build\Release\M3ScriptHook.dll" "%MAFIAPATH%\M3ScriptHook.dll" /B 
-copy /Y /B "%mypath%\build\Release\plugins\ExampleDLLPlugin.dll" "%MAFIAPATH%\plugins\ExampleDLLPlugin.dll" /B 
-copy /Y /B "%mypath%\build\Release\M3ScriptHookLauncher.exe" "%MAFIAPATH%\M3ScriptHookLauncher.exe" /B
+@echo off
+set MAFIAPATH=D:\SteamLibrary\steamapps\common\Mafia III
+set mypath=%~dp0
+
+copy /Y /B "%mypath%\build\Release\dxgi.dll" "%MAFIAPATH%\dxgi.dll" /B 
+del /F /Q "%MAFIAPATH%\dxgi.pdb"

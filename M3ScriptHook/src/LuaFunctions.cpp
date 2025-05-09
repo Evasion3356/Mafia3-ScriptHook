@@ -154,6 +154,7 @@ __declspec(dllexport) void logPointer(std::string name, uint64_t pointer)
 		std::stringstream ss;
 		ss << name << "Failed to find: " << name;
 		M3ScriptHook::instance()->Log(ss.str());
+		return;
 	}
 
 	// Get the base address of the main module
