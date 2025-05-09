@@ -149,8 +149,24 @@ int32_t lua_gettop_(lua_State *L)
 //
 __declspec(dllexport) void logPointer(std::string name, uint64_t pointer)
 {
+	if (pointer == NULL)
+	{
+		std::stringstream ss;
+		ss << name << "Failed to find: " << name;
+		M3ScriptHook::instance()->Log(ss.str());
+	}
+
+	// Get the base address of the main module
+	uint64_t baseAddress = reinterpret_cast<uint64_t>(GetModuleHandle(nullptr));
+
+	// Calculate the offset
+	uint64_t offset = pointer - baseAddress;
+
+	// Format the log message
 	std::stringstream ss;
-	ss << name << " (" << std::hex << pointer << ")";
+	ss << name << " Mafia3DefinitiveEdition.exe+0x" << std::hex << std::uppercase << offset;
+
+	// Log the message
 	M3ScriptHook::instance()->Log(ss.str().c_str());
 }
 
@@ -184,7 +200,6 @@ int32_t LuaFunctions::PrintToLog(lua_State *L)
 
 int32_t LuaFunctions::BindKey(lua_State *L)
 {
-	M3ScriptHook::instance()->Log(__FUNCTION__);
 	const char *key = "";
 	const char *context = "";
 
@@ -202,7 +217,6 @@ int32_t LuaFunctions::BindKey(lua_State *L)
 
 int32_t LuaFunctions::UnbindKey(lua_State *L)
 {
-	M3ScriptHook::instance()->Log(__FUNCTION__);
 	const char *key = "";
 	const char *context = "";
 
@@ -214,7 +228,7 @@ int32_t LuaFunctions::UnbindKey(lua_State *L)
 		context = plua_tostring(L, 2);
 	}
 
-	M3ScriptHook::instance()->DestroyKeyBind(key, context);
+	M3ScriptHook::instance()->DestroyKeyBind(key);
 	return 0;
 }
 
@@ -272,12 +286,11 @@ int32_t LuaFunctions::FNV32a(lua_State *L)
 LuaFunctions::LuaFunctions()
 {
 	M3ScriptHook::instance()->Log(__FUNCTION__);
-	// Yep, it's thread blocking, but that's what I want, no processing of other stuff until this shit's ready..
-	do {
-		M3ScriptHook::instance()->Log(__FUNCTION__ " Game is not ready, script engine not initialized, retry");
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		std::this_thread::yield();
-	} while (!this->LoadPointers());
+	if (!this->LoadPointers())
+	{
+		M3ScriptHook::instance()->Log(__FUNCTION__ " Failed to find signatures.");
+		exit(1);
+	}
 }
 
 C_ScriptGameMachine *LuaFunctions::GetMainGameScriptMachine()
@@ -293,97 +306,105 @@ bool LuaFunctions::IsMainScriptMachineReady()
 bool LuaFunctions::LoadPointers()
 {
 	M3ScriptHook::instance()->Log(__FUNCTION__);
-	uint64_t engineAssignAddress = hooking::pattern("48 89 05 ? ? ? ? 48 8B 10 FF 92 ? ? ? ?").get(0).origaddr();
+
+	uint64_t engineAssignAddress = hooking::pattern("48 89 3D ? ? ? ? 48 8B 07").get(0).origaddr();
+	if (!engineAssignAddress)
+	{
+		return this->m_mainScriptMachineReady;
+	}
 	uint64_t engine = engineAssignAddress + *(int32_t *)(engineAssignAddress + 3) + 7;
-	if (*(uintptr_t *)engine == 0) {
-		return this->m_mainScriptMachineReady;
-	}
-
-	//
-	this->m_pMainGameScriptMachine = *(C_ScriptGameMachine **)engine;
 	logPointer("m_pMainGameScriptMachine", engine);
-	if (!this->m_pMainGameScriptMachine) {
-		return this->m_mainScriptMachineReady;
+	while (*(uintptr_t *)engine == 0)
+	{
+		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
+	this->m_pMainGameScriptMachine = *(C_ScriptGameMachine**)engine;
 
-	//
-	auto pCallAddr = GetPointerFromPattern("lua_pcall", "E8 ? ? ? ? 85 C0 74 05 48 83 43 ? ?");
-	auto pCall = pCallAddr + *(int32_t *)(pCallAddr + 1) + 5;
+	auto pCallAddr = GetPointerFromPattern("lua_pcall", "E8 ? ? ? ? 8B D8 85 C0 75 ? 4C 8B C5");
 	logPointer("lua_pcall", pCallAddr);
+	auto pCall = pCallAddr + *(int32_t *)(pCallAddr + 1) + 5;
 	plua_pcall2 = (lua_pcall_t)pCall;
 	if (!plua_pcall2) {
 		return this->m_mainScriptMachineReady;
 	}
 
-	//
-	plua_tostring = (lua_tostring_t)GetPointerFromPattern("lua_tostring", "4C 8B C9 81 FA ? ? ? ? 7E 37");
+	plua_tostring = (lua_tostring_t)GetPointerFromPattern("lua_tostring", "81 FA ? ? ? ? 7E ? 85 D2 7E ? 48 8B 41 ? 48 63 D2 48 83 C0 ? 48 C1 E2 ? 48 03 D0 48 3B 51 ? 73 ? 45 33 C0");
 	logPointer("lua_tostring", (uintptr_t)plua_tostring);
-	if (!plua_tostring) {
+	if (!plua_tostring)
+	{
 		return this->m_mainScriptMachineReady;
 	}
 
-	//
-	auto isStringAddr = GetPointerFromPattern("lua_isstring", "E8 ? ? ? ? 85 C0 74 5E 8B D3");
-	auto isString = isStringAddr + *(int32_t *)(isStringAddr + 1) + 5;
+	auto isStringAddr = GetPointerFromPattern("lua_isstring", "E8 ? ? ? ? 85 C0 74 ? BA ? ? ? ? 48 8B CF E8 ? ? ? ? 48 8B D0");
 	logPointer("lua_isstring", isStringAddr);
+	auto isString = isStringAddr + *(int32_t *)(isStringAddr + 1) + 5;
 	plua_isstring = (lua_isstring_t)isString;
 	if (!plua_isstring) {
 		return this->m_mainScriptMachineReady;
 	}
 
 	//
-	auto loadBufferAddr = GetPointerFromPattern("lua_loadbuffer", "E8 ? ? ? ? 8B F8 85 FF 74 17");
+	auto loadBufferAddr = GetPointerFromPattern("lua_loadbuffer", "E8 ? ? ? ? 8B D8 85 C0 75 ? 45 33 C9");
+	if (!loadBufferAddr)
+	{
+		return this->m_mainScriptMachineReady;
+	}
 	auto loadBuffer = loadBufferAddr + *(int32_t *)(loadBufferAddr + 1) + 5;
 	logPointer("lua_loadBuffer", loadBuffer);
 	pluaL_loadbuffer = (luaL_loadbuffer_t)loadBuffer;
-	if (!pluaL_loadbuffer) {
-		return this->m_mainScriptMachineReady;
-	}
 
 	//
-	plua_newthread = (lua_newthread_t)GetPointerFromPattern("lua_newthread", "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 41 56 41 57 48 83 EC 40 48 8B 79 10 48 8B F1");
+	plua_newthread = (lua_newthread_t)GetPointerFromPattern("lua_newthread", "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 41 56 41 57 48 83 EC ? 48 8B 79 ? 48 8B F1 44 8B B9");
 	logPointer("lua_newthread", (uintptr_t)plua_newthread);
 	if (!plua_newthread) {
 		return this->m_mainScriptMachineReady;
 	}
 
 	//
-	auto pushClosureAddr = GetPointerFromPattern("lua_pushcclosure", "E8 ? ? ? ? 48 8B 47 48 45 33 C9");
-	auto pushClosure = pushClosureAddr + *(int32_t *)(pushClosureAddr + 1) + 5;
-	logPointer("lua_pushcclosure", pushClosure);
-	plua_pushcclosure = (lua_pushcclosure_t)pushClosure;
+	plua_pushcclosure = (lua_pushcclosure_t)GetPointerFromPattern("plua_pushcclosure", "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 54 41 56 41 57 48 83 EC ? 49 63 F0");
+	logPointer("lua_pushcclosure", (uintptr_t)plua_pushcclosure);
 	if (!plua_pushcclosure) {
 		return this->m_mainScriptMachineReady;
 	}
 
 	//
-	auto setFieldAddr = GetPointerFromPattern("lua_setfield", "E8 ? ? ? ? 8B D5 49 8B CF E8 ? ? ? ? 41 8B D6");
+	auto setFieldAddr = GetPointerFromPattern("lua_setfield", "E8 ? ? ? ? BE ? ? ? ? 81 BF");
+	if (!setFieldAddr)
+	{
+		return this->m_mainScriptMachineReady;
+	}
 	auto setField = setFieldAddr + *(int32_t *)(setFieldAddr + 1) + 5;
 	logPointer("lua_setfield", setField);
 	plua_setfield = (lua_setfield_t)setField;
-	if (!plua_setfield) {
-		return this->m_mainScriptMachineReady;
-	}
 
 	//
 	auto setGobalAddr = GetPointerFromPattern("lua_setglobal", "E8 ? ? ? ? 48 8B 54 24 ? 48 8B CE E8 ? ? ? ? 85 C0");
+	if (!setGobalAddr)
+	{
+		return this->m_mainScriptMachineReady;
+	}
 	auto setGlobal = setGobalAddr + *(int32_t *)(setGobalAddr + 1) + 5;
 	logPointer("lua_setglobal", setGlobal);
 	plua_setglobal = (lua_setglobal_t)setGlobal;
-	if (!plua_setglobal) {
-		return this->m_mainScriptMachineReady;
-	}
+
+	/*static auto pat = hooking::pattern("48 8B 05 ? ? ? ? 48 89 44 24 ? 4C 8B 4C 24").get(0).origaddr();
+	auto patAddr = pat + *(int32_t*)(pat + 3) + 7;
+	patAddr = *(uint64_t*)patAddr;
+	if (patAddr)
+	{
+		logPointer("patAddr", patAddr);
+		DWORD old_protect;
+		VirtualProtect((PVOID)patAddr, strlen("/gui/main_menu_dev.swf"), PAGE_EXECUTE_READWRITE, (PDWORD)&old_protect);
+		memcpy((void*)patAddr, "/gui/main_menu_dev.swf", strlen("/gui/main_menu_dev.swf"));
+		DWORD unused;
+		VirtualProtect((PVOID)patAddr, strlen("/gui/main_menu_dev.swf"), old_protect, &unused);
+	}*/
 
 	//
 	this->m_mainScriptMachineReady = true;
 
 	M3ScriptHook::instance()->Log(__FUNCTION__ " Finished");
 	return m_mainScriptMachineReady;
-
-	static auto pat = hooking::pattern("4C 8B 0D ? ? ? ? 33 ED").get(0).origaddr();
-	auto patAddr = pat + *(int32_t *)(pat + 3) + 7;
-	patAddr = *(uint64_t *)patAddr;
-	memcpy((void*)patAddr, "/gui/main_menu_dev.swf", strlen("/gui/main_menu_dev.swf"));
 	/*
 	static auto addr = hooking::pattern("F3 0F 10 0D ? ? ? ? 4C 8D 44 24 ? F3 48 0F 2C D0").get(0).origaddr();
 	static auto inc = hooking::inject_call<uintptr_t, lua_State*, int32_t>((addr + 0x62));

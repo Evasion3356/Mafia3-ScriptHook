@@ -36,6 +36,7 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <iomanip>
 #include <algorithm>
 
 #include <M3ScriptHook.h>
@@ -43,6 +44,33 @@
 #include <LuaFunctions.h>
 #include <ScriptSystem.h>
 #include <hooking/hooking.h>
+
+#ifdef _WIN64
+#define DLLPATH "\\\\.\\GLOBALROOT\\SystemRoot\\System32\\dxgi.dll"
+#else
+#define DLLPATH "\\\\.\\GLOBALROOT\\SystemRoot\\SysWOW64\\dxgi.dll"
+#endif // _WIN64
+
+#pragma comment(linker, "/EXPORT:ApplyCompatResolutionQuirking=" DLLPATH ".ApplyCompatResolutionQuirking")
+#pragma comment(linker, "/EXPORT:CompatString=" DLLPATH ".CompatString")
+#pragma comment(linker, "/EXPORT:CompatValue=" DLLPATH ".CompatValue")
+#pragma comment(linker, "/EXPORT:CreateDXGIFactory=" DLLPATH ".CreateDXGIFactory")
+#pragma comment(linker, "/EXPORT:CreateDXGIFactory1=" DLLPATH ".CreateDXGIFactory1")
+#pragma comment(linker, "/EXPORT:CreateDXGIFactory2=" DLLPATH ".CreateDXGIFactory2")
+#pragma comment(linker, "/EXPORT:DXGID3D10CreateDevice=" DLLPATH ".DXGID3D10CreateDevice")
+#pragma comment(linker, "/EXPORT:DXGID3D10CreateLayeredDevice=" DLLPATH ".DXGID3D10CreateLayeredDevice")
+#pragma comment(linker, "/EXPORT:DXGID3D10GetLayeredDeviceSize=" DLLPATH ".DXGID3D10GetLayeredDeviceSize")
+#pragma comment(linker, "/EXPORT:DXGID3D10RegisterLayers=" DLLPATH ".DXGID3D10RegisterLayers")
+#pragma comment(linker, "/EXPORT:DXGIDeclareAdapterRemovalSupport=" DLLPATH ".DXGIDeclareAdapterRemovalSupport")
+#pragma comment(linker, "/EXPORT:DXGIDisableVBlankVirtualization=" DLLPATH ".DXGIDisableVBlankVirtualization")
+#pragma comment(linker, "/EXPORT:DXGIDumpJournal=" DLLPATH ".DXGIDumpJournal")
+#pragma comment(linker, "/EXPORT:DXGIGetDebugInterface1=" DLLPATH ".DXGIGetDebugInterface1")
+#pragma comment(linker, "/EXPORT:DXGIReportAdapterConfiguration=" DLLPATH ".DXGIReportAdapterConfiguration")
+#pragma comment(linker, "/EXPORT:PIXBeginCapture=" DLLPATH ".PIXBeginCapture")
+#pragma comment(linker, "/EXPORT:PIXEndCapture=" DLLPATH ".PIXEndCapture")
+#pragma comment(linker, "/EXPORT:PIXGetCaptureState=" DLLPATH ".PIXGetCaptureState")
+#pragma comment(linker, "/EXPORT:SetAppCompatStringPointer=" DLLPATH ".SetAppCompatStringPointer")
+#pragma comment(linker, "/EXPORT:UpdateHMDEmulationStatus=" DLLPATH ".UpdateHMDEmulationStatus")
 
 M3ScriptHook::M3ScriptHook()
 {
@@ -87,8 +115,13 @@ void M3ScriptHook::Log(const char* string, ...)
 	const char* msg =  &buffer[thisBuffer * BUFFER_LENGTH];
 
 	std::fstream file("ScriptHook.log", std::ios::out | std::ios::app);
-	file << msg;
-	file << "\n";
+
+	auto now = std::chrono::system_clock::now();
+	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+	auto timer = std::chrono::system_clock::to_time_t(now);
+	auto local_time = *std::localtime(&timer);
+
+	file << "[" << std::put_time(&local_time, "%m/%d/%Y %I:%M:%S") << ":" << std::setfill('0') << std::setw(3) << ms.count() << " " << std::put_time(&local_time, "%p") << "] " << msg << std::endl;
 	file.close();
 }
 
@@ -165,14 +198,14 @@ LUA_API bool ExecuteLua(lua_State *L, const std::string &lua)
 
 bool M3ScriptHook::ExecuteLua(lua_State *L, const std::string &lua)
 {
-	this->Log(std::string("Trying to execute: " + lua).c_str());
+	this->Log(std::string("Trying to execute: " + lua));
 
 	if (!L) {
 		this->Log("BadState");
 		return false;
 	}
 
-	luaL_loadbuffer_(L, const_cast<char*>(lua.c_str()), lua.length(), "test");
+	luaL_loadbuffer_(L, const_cast<char*>(lua.c_str()), lua.length(), "Mafia3ScriptHook");
 
 	int32_t result = lua_pcall_(L, 0, LUA_MULTRET, 0);
 
@@ -216,10 +249,10 @@ uint32_t WINAPI M3ScriptHook::mainThread(LPVOID) {
 		if (GetAsyncKeyState(VK_F1) & 1) {
 			ScriptSystem::instance()->ReloadScripts();
 		}
-		if (GetAsyncKeyState(VK_F2) & 1) {
+		/*if (GetAsyncKeyState(VK_F2) & 1) {
 			instance->Shutdown();
 			PluginSystem::instance()->ReloadPlugins();
-		}
+		}*/
 		/*
 		if (GetAsyncKeyState(VK_F3) & 1) {
 			instance->Shutdown();
@@ -258,7 +291,7 @@ void M3ScriptHook::Shutdown()
 
 void M3ScriptHook::CreateKeyBind(const char *key, const char *context)
 {
-	this->Log(__FUNCTION__);
+	M3ScriptHook::instance()->Log("Binding key %s to function %s", key, context);
 	std::unique_lock<std::recursive_mutex> lkScr(_keyBindMutex);
 
 	bool found = false;
@@ -278,9 +311,9 @@ void M3ScriptHook::CreateKeyBind(const char *key, const char *context)
 	}
 }
 
-void M3ScriptHook::DestroyKeyBind(const char *key, const char *context)
+void M3ScriptHook::DestroyKeyBind(const char* key)
 {
-	this->Log(__FUNCTION__);
+	M3ScriptHook::instance()->Log("Unbinding key %", key);
 	//std::lock_guard<std::mutex> lk{ _keyBindMutex };
 	std::unique_lock<std::recursive_mutex> lkScr(_keyBindMutex);
 

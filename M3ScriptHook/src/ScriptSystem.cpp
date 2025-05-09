@@ -53,14 +53,14 @@ void ScriptSystem::LoadScripts()
 
 		// Ignore the file if it starts with _ (underscore)
 		if (filename[0] == '_') {
-			M3ScriptHook::instance()->Log(__FUNCTION__ " ignored script " + filename);
+			M3ScriptHook::instance()->Log("ignored script " + filename);
 		}
 		else {
 			scripts.push_back(path);
 
 			M3ScriptHook::instance()->LoadScript(path);
 
-			M3ScriptHook::instance()->Log(__FUNCTION__ " loaded script " + filename);
+			M3ScriptHook::instance()->Log("loaded script " + filename);
 		}
 	} while (file && FindNextFile(file, &data));
 }

@@ -114,7 +114,7 @@ public:
 	void Shutdown();
 
 	void CreateKeyBind(const char *key, const char *context);
-	void DestroyKeyBind(const char *key, const char *context);
+	void DestroyKeyBind(const char *key);
 	void ProcessKeyBinds();
 };
 
