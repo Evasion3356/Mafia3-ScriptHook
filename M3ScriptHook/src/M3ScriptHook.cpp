@@ -176,8 +176,10 @@ void M3ScriptHook::EndThreads()
 void M3ScriptHook::LoadScript(const std::string &file)
 {
 	this->Log(__FUNCTION__);
-	auto threadState = LuaStateManager::instance()->GetState();
-	this->LoadLuaFile(threadState, file);
+	std::string lua = "function dofile (filename)local f = assert(loadfile(filename)) return f() end dofile(\"";
+	lua.append(file);
+	lua.append("\")");
+	this->QueueLua(lua);
 }
 
 void M3ScriptHook::LoadLuaFile(lua_State *L, const std::string &name)
@@ -233,6 +235,46 @@ bool M3ScriptHook::ExecuteLua(lua_State *L, const std::string &lua)
 		}
 	}
 	return true;
+}
+
+void M3ScriptHook::QueueWork(std::function<void(lua_State*)> work)
+{
+	std::lock_guard<std::mutex> lk(m_luaQueueMutex);
+	m_luaQueue.push_back(std::move(work));
+}
+
+void M3ScriptHook::QueueLua(const std::string &lua)
+{
+	// Deliberately runs against the raw main L, not a fresh coroutine via
+	// LuaStateManager::GetState()/lua_newthread_. lua_newthread pushes the
+	// new thread object onto the calling state's stack and nothing ever
+	// pops it - doing that on every queued item (every keybind press, every
+	// script load) permanently grows the main stack each time, which
+	// desyncs engine code that assumes a fixed stack layout. The original
+	// keybind path used the raw L directly for exactly this reason.
+	this->QueueWork([lua](lua_State *L) {
+		M3ScriptHook::instance()->ExecuteLua(L, lua);
+	});
+}
+
+// Only safe to call from the thread that owns the game's Lua state -
+// see LuaFunctions::Process, which drives this from a hook that runs
+// on MafiaMainThread.
+void M3ScriptHook::DrainLuaQueue(lua_State *L)
+{
+	std::deque<std::function<void(lua_State*)>> pending;
+	{
+		std::lock_guard<std::mutex> lk(m_luaQueueMutex);
+		if (m_luaQueue.empty()) {
+			return;
+		}
+		pending.swap(m_luaQueue);
+	}
+
+	std::lock_guard<std::mutex> execLk(m_luaExecMutex);
+	for (auto &work : pending) {
+		work(L);
+	}
 }
 
 uint32_t WINAPI M3ScriptHook::mainThread(LPVOID) {
@@ -344,26 +386,31 @@ void M3ScriptHook::ProcessKeyBinds()
 	//this->Log(__FUNCTION__);
 	std::unique_lock<std::recursive_mutex> lkScr(_keyBindMutex);
 
-	auto L = GetL();
-	if (!L)
-		return;
-
-	//this->Log("%d", keyBinds.size());
 	if (!keyBinds.size())
 		return;
 
-	/*auto it = keyBinds.begin();
-	for (auto bind : keyBinds) //; it != keyBinds.end();)
-	{
-		if (GetAsyncKeyState(bind->key) & 1)
-		{
-			M3ScriptHook::instance()->ExecuteLua(L, bind->bind);
-		}
-		//++it;
-	}*/
+	// NOTE: this runs on our own polling thread, not on MafiaMainThread,
+	// which also drives the same Lua state every frame. Calling
+	// ExecuteLua directly from here races with the engine's own Lua/GC
+	// activity and can corrupt memory (observed as a crash deep in
+	// unrelated engine code later on). Queue the work instead and let
+	// DrainLuaQueue run it from the main-thread hook.
+	//
+	// Edge detection is done ourselves via keyWasDown rather than trusting
+	// GetAsyncKeyState's low-order "pressed since last call" bit - that bit
+	// is a shared, consumable flag, and something else in this process
+	// (Special K polls global hotkeys aggressively) was eating it before
+	// our 10ms poll ever saw it, even though the "currently down" high bit
+	// was observably correct. The high bit isn't consumable, so tracking
+	// down/up transitions ourselves across polls is reliable regardless of
+	// who else is also calling GetAsyncKeyState.
 	for (auto it = keyBinds.begin(); it != keyBinds.end(); ++it) {
-		if (GetAsyncKeyState(it->first) & 1) {
-			M3ScriptHook::instance()->ExecuteLua(L, it->second);
+		bool isDown = (GetAsyncKeyState(it->first) & 0x8000) != 0;
+		bool wasDown = keyWasDown[it->first];
+		keyWasDown[it->first] = isDown;
+
+		if (isDown && !wasDown) {
+			M3ScriptHook::instance()->QueueLua(it->second);
 		}
 	}
 

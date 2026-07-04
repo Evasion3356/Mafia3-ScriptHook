@@ -1,0 +1,9 @@
+<Project>
+  <Target Name="CreateM3ScriptHookImportLibAlias"
+		  AfterTargets="Link"
+		  Condition="'$(MSBuildProjectName)' == 'M3ScriptHook' and Exists('$(OutDir)dxgi.lib')">
+	<Copy SourceFiles="$(OutDir)dxgi.lib"
+		  DestinationFiles="$(OutDir)M3ScriptHook.lib"
+		  SkipUnchangedFiles="true" />
+  </Target>
+</Project>

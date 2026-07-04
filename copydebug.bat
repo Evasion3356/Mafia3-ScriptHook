@@ -1,5 +1,5 @@
 @echo off
-set MAFIAPATH=D:\SteamLibrary\steamapps\common\Mafia III
+set MAFIAPATH=C:\Program Files (x86)\Steam\steamapps\common\Mafia III
 set mypath=%~dp0
 
 copy /Y /B "%mypath%\build\Debug\dxgi.dll" "%MAFIAPATH%\dxgi.dll" /B 

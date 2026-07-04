@@ -37,6 +37,8 @@
 #include <map>
 #include <mutex>
 #include <vector>
+#include <deque>
+#include <functional>
 
 static const char *BindableKeys[] = {
 	"VK_LBUTTON", "VK_RBUTTON", "VK_CANCEL", "VK_MBUTTON", "VK_XBUTTON1",
@@ -95,7 +97,14 @@ private:
 	bool m_bEnded = false;
 	//std::vector<M3KeyBind*> keyBinds = {};
 	std::map<uint8_t, std::string> keyBinds = {};
+	std::map<uint8_t, bool> keyWasDown = {};
 	std::recursive_mutex _keyBindMutex;
+
+	std::deque<std::function<void(lua_State*)>> m_luaQueue;
+	std::mutex m_luaQueueMutex;
+	// Guards the actual execution in DrainLuaQueue, in case the main-thread
+	// hook site ever turns out to be reachable from more than one thread.
+	std::mutex m_luaExecMutex;
 
 public:
 	M3ScriptHook();
@@ -108,6 +117,22 @@ public:
 	void LoadScript(const std::string &file);
 	void LoadLuaFile(lua_State *L, const std::string &name);
 	bool ExecuteLua(lua_State *L, const std::string &lua);
+
+	// Thread-safe: queues Lua source to be run later on the thread that
+	// actually owns the game's Lua state (see DrainLuaQueue). Any caller
+	// that isn't already known to be on that thread must go through this
+	// instead of calling ExecuteLua directly.
+	void QueueLua(const std::string &lua);
+
+	// Thread-safe: same as QueueLua but for arbitrary work that needs to
+	// touch the Lua state (e.g. registering C closures, starting plugins)
+	// rather than just running a chunk of Lua source.
+	void QueueWork(std::function<void(lua_State*)> work);
+
+	// Must only be called from the thread that owns the game's Lua state
+	// (i.e. from the main-thread hook installed in LuaFunctions::Process).
+	void DrainLuaQueue(lua_State *L);
+
 	static uint32_t WINAPI mainThread(LPVOID);
 	void StartThreads();
 	bool HasEnded();

@@ -63,9 +63,15 @@ void LuaStateManager::StateChanged(lua_State *L)
 	++this->m_stateChangeCount;
 	this->m_pLuaState = L;
 
-	LuaFunctions::instance()->Setup();
+	// This runs on WatcherThread, not on the thread that owns the game's
+	// Lua state - Setup()/StartPlugins() touch that state directly, so
+	// they must be marshaled onto the main thread like everything else.
+	bool isFirstState = (this->m_stateChangeCount == 1);
+	M3ScriptHook::instance()->QueueWork([isFirstState](lua_State*) {
+		LuaFunctions::instance()->Setup();
+		isFirstState ? PluginSystem::instance()->StartPlugins() : PluginSystem::instance()->RelaunchPlugins();
+	});
 
-	this->m_stateChangeCount == 1 ? PluginSystem::instance()->StartPlugins() :PluginSystem::instance()->RelaunchPlugins();
 	ScriptSystem::instance()->ReloadScripts();
 }
 

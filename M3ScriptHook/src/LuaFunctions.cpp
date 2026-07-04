@@ -40,6 +40,8 @@
 #include <hooking/hooking.h>
 #include <fstream>
 #include <thread>
+#include <vector>
+#include <memory>
 
  /************************************************************************/
  /* Find pattern implementation											*/
@@ -70,6 +72,53 @@ lua_pcall_t				plua_pcall2 = nullptr;
 __declspec(dllexport) int32_t lua_pcall_(lua_State *L, int32_t nargs, int32_t nresults, int32_t errfunc)
 {
 	return plua_pcall2(L, nargs, nresults, errfunc);
+}
+
+// Drains the cross-thread Lua queue right before the engine's own pcall
+// runs, guaranteeing DrainLuaQueue only ever executes on whatever thread
+// the engine actually calls pcall from. Installed on sub_144561F50 itself
+// (a bare "jmp lua_pcall" trampoline), NOT on any one of its 32+ individual
+// call sites - hooking a single caller only catches that caller's own
+// frequency (confirmed dead in practice), whereas hooking the trampoline's
+// own body catches every one of its callers, which is what actually fires
+// hundreds of times/sec during normal play. Its single-instruction body
+// also makes it a stable anchor unlikely to get restructured by the
+// compiler across game patches.
+static int32_t __cdecl PcallDrainThunk(lua_State *L, int32_t nargs, int32_t nresults, int32_t errfunc)
+{
+	LuaFunctions::instance()->Process();
+	return plua_pcall2(L, nargs, nresults, errfunc);
+}
+
+using PcallJumpHook = hooking::inject_jump<int32_t, lua_State*, int32_t, int32_t, int32_t>;
+static std::unique_ptr<PcallJumpHook> g_pcallDrainHook;
+
+// One of 32+ call sites to the "jmp lua_pcall" trampoline (sub_144561F50) -
+// used only to resolve the trampoline's own address (same +rel32+5 math
+// used to resolve lua_pcall itself), not hooked directly. mov rax, rdi;
+// neg rax right after the call is a distinctive enough sequence to be
+// unique in the binary without needing excessive context.
+static const char *kPcallTrampolineCallSitePattern = "E8 ? ? ? ? 48 8B C7 48 F7 D8";
+
+static void InstallMainThreadDrainHook()
+{
+	auto callSiteAddr = GetPointerFromPattern("pcall_trampoline_callsite", kPcallTrampolineCallSitePattern);
+	if (!callSiteAddr) {
+		M3ScriptHook::instance()->Log("InstallMainThreadDrainHook: pattern not found - queued Lua (keybinds/setTimeout/script reload) will never run");
+		return;
+	}
+
+	auto trampolineAddr = callSiteAddr + *(int32_t *)(callSiteAddr + 1) + 5;
+	logPointer("pcall_trampoline", trampolineAddr);
+
+	try {
+		g_pcallDrainHook = std::make_unique<PcallJumpHook>(trampolineAddr);
+		g_pcallDrainHook->inject(&PcallDrainThunk);
+		M3ScriptHook::instance()->Log("InstallMainThreadDrainHook installed");
+	}
+	catch (const std::exception &e) {
+		M3ScriptHook::instance()->Log(std::string("InstallMainThreadDrainHook failed: ") + e.what());
+	}
 }
 
 /************************************************************************/
@@ -248,11 +297,13 @@ int32_t LuaFunctions::DelayBuffer(lua_State *L)
 	}
 
 	// Pretty hacky implementation, we should consider using a Job queue instead and checking time?
-	std::thread th = std::thread([L, time, context]() {
+	std::thread th = std::thread([time, context]() {
 		M3ScriptHook::instance()->Log(__FUNCTION__);
 		auto mtime = std::stoi(time);
 		std::this_thread::sleep_for(std::chrono::milliseconds(mtime));
-		M3ScriptHook::instance()->ExecuteLua(L, context);
+		// This thread doesn't own the game's Lua state - queue the work
+		// so it runs on MafiaMainThread instead of racing it.
+		M3ScriptHook::instance()->QueueLua(context);
 	});
 	th.detach();
 
@@ -294,6 +345,26 @@ LuaFunctions::LuaFunctions()
 	}
 }
 
+// Drains any Lua work queued from other threads (keybinds, setTimeout,
+// script (re)loads). MUST only be invoked from the main-thread hook
+// installed in LoadPointers, since that's the only place we can be sure
+// we're on the same thread the engine itself drives its Lua state from.
+void LuaFunctions::Process()
+{
+	static bool loggedAlive = false;
+	if (!loggedAlive) {
+		loggedAlive = true;
+		M3ScriptHook::instance()->Log(__FUNCTION__ " main-thread drain hook is alive (first fire)");
+	}
+
+	auto L = GetL(this->m_pMainGameScriptMachine);
+	if (!L) {
+		return;
+	}
+
+	M3ScriptHook::instance()->DrainLuaQueue(L);
+}
+
 C_ScriptGameMachine *LuaFunctions::GetMainGameScriptMachine()
 {
 	return this->m_pMainGameScriptMachine;
@@ -322,12 +393,15 @@ bool LuaFunctions::LoadPointers()
 	this->m_pMainGameScriptMachine = *(C_ScriptGameMachine**)engine;
 
 	auto pCallAddr = GetPointerFromPattern("lua_pcall", "E8 ? ? ? ? 8B D8 85 C0 75 ? 4C 8B C5");
-	logPointer("lua_pcall", pCallAddr);
+	logPointer("lua_pcall_callsite", pCallAddr);
 	auto pCall = pCallAddr + *(int32_t *)(pCallAddr + 1) + 5;
+	logPointer("lua_pcall", pCall);
 	plua_pcall2 = (lua_pcall_t)pCall;
 	if (!plua_pcall2) {
 		return this->m_mainScriptMachineReady;
 	}
+
+	InstallMainThreadDrainHook();
 
 	plua_tostring = (lua_tostring_t)GetPointerFromPattern("lua_tostring", "81 FA ? ? ? ? 7E ? 85 D2 7E ? 48 8B 41 ? 48 63 D2 48 83 C0 ? 48 C1 E2 ? 48 03 D0 48 3B 51 ? 73 ? 45 33 C0");
 	logPointer("lua_tostring", (uintptr_t)plua_tostring);
